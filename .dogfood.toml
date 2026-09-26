@@ -1,0 +1,25 @@
+[portal]
+base_url = "http://localhost:8080"
+
+[tiers]
+claimed = ["T1"]
+pitch = "A hackathon submission and judging portal with backend-enforced roles from day one."
+
+[auth]
+# These match the fixed tokens seed.py issues on first boot — see
+# app/seed.py TOKEN_ORGANIZER / TOKEN_JUDGE_A / TOKEN_JUDGE_B / TOKEN_PARTICIPANT.
+organizer   = "Cookie: session=org_7f2a"
+judge_a     = "Cookie: session=jdg_a_91bc"
+judge_b     = "Cookie: session=jdg_b_44de"
+participant = "Cookie: session=prt_2e88"
+
+# NOTE: these all point at JSON API endpoints, not the React SPA's own
+# client-side routes. run.py uses plain urllib with no JS execution, so
+# a route that only resolves once React has rendered would never show
+# fixture content in the raw response body. See ARCHITECTURE.md.
+[routes]
+gallery      = "/api/projects"
+submit       = "/api/projects"
+judge_scores = "/api/judge/scores"
+peer_scores  = "/api/judge/scores?judge=judge_a"
+csv_export   = "/api/export.csv"

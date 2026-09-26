@@ -1,0 +1,39 @@
+# docker compose up
+#
+# Brings up the whole portal with zero external dependencies:
+#   - backend  (FastAPI + SQLite, seeded from data/fixtures.json)      -> :8080
+#   - frontend (React/Vite dev server, the human-facing SPA)            -> :5173
+#
+# .dogfood.toml's base_url (http://localhost:8080) points at the
+# backend directly, because the acceptance checker (run.py) makes
+# plain HTTP requests with no JS execution — see ARCHITECTURE.md
+# "Checker-facing routes vs. SPA routes" for why the API and the SPA
+# are two separate route surfaces on the same backend.
+#
+# For humans: open http://localhost:5173 to use the actual portal.
+
+services:
+  backend:
+    build: ./src/backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/fixtures.json:/app/data/fixtures.json:ro
+    environment:
+      DOGFOOD_FIXTURES_PATH: /app/data/fixtures.json
+      DOGFOOD_DB_PATH: /app/data/dogfood.db
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  frontend:
+    build: ./src/frontend
+    ports:
+      - "5173:5173"
+    environment:
+      BACKEND_PROXY_TARGET: http://backend:8080
+    depends_on:
+      backend:
+        condition: service_healthy

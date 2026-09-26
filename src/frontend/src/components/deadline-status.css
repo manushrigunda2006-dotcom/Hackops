@@ -1,0 +1,36 @@
+.deadline-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-size: 0.92rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+
+.deadline-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.deadline-status.is-open {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.deadline-status.is-open .deadline-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.deadline-status.is-closed {
+  background: var(--fail-soft);
+  color: var(--fail);
+  border-color: color-mix(in srgb, var(--fail) 25%, transparent);
+}
+.deadline-status.is-closed .deadline-dot {
+  background: var(--fail);
+}
