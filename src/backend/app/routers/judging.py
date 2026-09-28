@@ -12,11 +12,36 @@ from ..database import get_db
 from ..util import iso_z
 
 
+# ---------------------------------------------------------------------------
+# Main T2 judging router
+# ---------------------------------------------------------------------------
+
 router = APIRouter(
     prefix="/api/judging",
     tags=["judging"],
 )
 
+
+# ---------------------------------------------------------------------------
+# Compatibility router for the DOGFOOD acceptance checker
+#
+# The checker expects:
+#   GET /api/judge/scores
+#   GET /api/judge/scores?judge=judge_a
+#   GET /api/export.csv
+#
+# These routes are kept separate from the main /api/judging routes so that
+# the existing API remains unchanged.
+# ---------------------------------------------------------------------------
+
+compat_router = APIRouter(
+    tags=["judging-compat"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _current_event(db: DBSession):
     event = (
@@ -82,11 +107,49 @@ def _calculate_weighted_average(score, rubric):
     )
 
 
+def _get_rubric(db, event_id):
+    return (
+        db.query(models.RubricCriterion)
+        .filter(
+            models.RubricCriterion.event_id == event_id
+        )
+        .order_by(
+            models.RubricCriterion.name
+        )
+        .all()
+    )
+
+
+def _get_scores_for_judge(db, event_id, judge_id):
+    return (
+        db.query(models.JudgeScore)
+        .filter(
+            models.JudgeScore.event_id == event_id,
+            models.JudgeScore.judge_id == judge_id,
+        )
+        .order_by(
+            models.JudgeScore.submitted_at.desc()
+        )
+        .all()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Request model
+# ---------------------------------------------------------------------------
+
 class ScoreSubmission(BaseModel):
     project_id: str
     criteria: dict[str, float]
-    comment: str = Field(default="", max_length=5000)
+    comment: str = Field(
+        default="",
+        max_length=5000,
+    )
 
+
+# ---------------------------------------------------------------------------
+# Judge: read own scores
+# ---------------------------------------------------------------------------
 
 @router.get("/my-scores")
 def get_my_scores(
@@ -95,28 +158,24 @@ def get_my_scores(
 ):
     event = _current_event(db)
 
-    scores = (
-        db.query(models.JudgeScore)
-        .filter(
-            models.JudgeScore.event_id == event.id,
-            models.JudgeScore.judge_id == user.id,
-        )
-        .order_by(models.JudgeScore.submitted_at.desc())
-        .all()
+    scores = _get_scores_for_judge(
+        db,
+        event.id,
+        user.id,
     )
 
-    rubric = (
-        db.query(models.RubricCriterion)
-        .filter(
-            models.RubricCriterion.event_id == event.id
-        )
-        .all()
+    rubric = _get_rubric(
+        db,
+        event.id,
     )
 
     result = []
 
     for score in scores:
-        item = _serialize_score(score, db)
+        item = _serialize_score(
+            score,
+            db,
+        )
 
         item["weighted_average"] = (
             _calculate_weighted_average(
@@ -133,6 +192,10 @@ def get_my_scores(
         "scores": result,
     }
 
+
+# ---------------------------------------------------------------------------
+# Judge: read one own score
+# ---------------------------------------------------------------------------
 
 @router.get("/scores/{score_id}")
 def get_my_score(
@@ -159,15 +222,15 @@ def get_my_score(
             detail="You cannot access another judge's score.",
         )
 
-    rubric = (
-        db.query(models.RubricCriterion)
-        .filter(
-            models.RubricCriterion.event_id == event.id
-        )
-        .all()
+    rubric = _get_rubric(
+        db,
+        event.id,
     )
 
-    result = _serialize_score(score, db)
+    result = _serialize_score(
+        score,
+        db,
+    )
 
     result["weighted_average"] = (
         _calculate_weighted_average(
@@ -178,6 +241,10 @@ def get_my_score(
 
     return result
 
+
+# ---------------------------------------------------------------------------
+# Judge: read assignments
+# ---------------------------------------------------------------------------
 
 @router.get("/assignments")
 def get_my_assignments(
@@ -229,6 +296,10 @@ def get_my_assignments(
     }
 
 
+# ---------------------------------------------------------------------------
+# Judge: read rubric
+# ---------------------------------------------------------------------------
+
 @router.get("/rubric")
 def get_rubric(
     user=Depends(require_role("judge")),
@@ -236,15 +307,9 @@ def get_rubric(
 ):
     event = _current_event(db)
 
-    criteria = (
-        db.query(models.RubricCriterion)
-        .filter(
-            models.RubricCriterion.event_id == event.id
-        )
-        .order_by(
-            models.RubricCriterion.name
-        )
-        .all()
+    criteria = _get_rubric(
+        db,
+        event.id,
     )
 
     return {
@@ -260,6 +325,10 @@ def get_rubric(
         ],
     }
 
+
+# ---------------------------------------------------------------------------
+# Judge: submit or update score
+# ---------------------------------------------------------------------------
 
 @router.post("/scores")
 def submit_score(
@@ -286,12 +355,9 @@ def submit_score(
             detail="You are not assigned to this project.",
         )
 
-    rubric = (
-        db.query(models.RubricCriterion)
-        .filter(
-            models.RubricCriterion.event_id == event.id
-        )
-        .all()
+    rubric = _get_rubric(
+        db,
+        event.id,
     )
 
     if not rubric:
@@ -411,6 +477,10 @@ def submit_score(
 
     return result
 
+
+# ---------------------------------------------------------------------------
+# Organizer: live judging progress
+# ---------------------------------------------------------------------------
 
 @router.get("/progress")
 def get_judging_progress(
@@ -552,6 +622,10 @@ def get_judging_progress(
     }
 
 
+# ---------------------------------------------------------------------------
+# Organizer: CSV export
+# ---------------------------------------------------------------------------
+
 @router.get("/export.csv")
 def export_scores_csv(
     user=Depends(require_role("organizer")),
@@ -607,4 +681,138 @@ def export_scores_csv(
             "Content-Disposition":
                 'attachment; filename="judging-scores.csv"'
         },
+    )
+
+
+# ===========================================================================
+# DOGFOOD checker compatibility endpoints
+# ===========================================================================
+
+
+@compat_router.get("/api/judge/scores")
+def checker_judge_scores(
+    judge: str | None = None,
+    user=Depends(require_role("judge")),
+    db: DBSession = Depends(get_db),
+):
+    """
+    Compatibility endpoint for the DOGFOOD acceptance checker.
+
+    The checker expects /api/judge/scores.
+
+    A judge can only see their own scores.
+
+    When a judge query parameter is supplied, it represents a request
+    for a specific judge's scores. We reject that request rather than
+    allowing one judge to probe another judge's ballot.
+    """
+
+    if judge is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Judges cannot access another judge's scores.",
+        )
+
+    event = _current_event(db)
+
+    scores = _get_scores_for_judge(
+        db,
+        event.id,
+        user.id,
+    )
+
+    rubric = _get_rubric(
+        db,
+        event.id,
+    )
+
+    result = []
+
+    for score in scores:
+        item = _serialize_score(
+            score,
+            db,
+        )
+
+        item["weighted_average"] = (
+            _calculate_weighted_average(
+                score,
+                rubric,
+            )
+        )
+
+        result.append(item)
+
+    return {
+        "event_id": event.id,
+        "judge_id": user.id,
+        "scores": result,
+    }
+
+
+@compat_router.get("/api/judge/scores/{score_id}")
+def checker_judge_score(
+    score_id: str,
+    user=Depends(require_role("judge")),
+    db: DBSession = Depends(get_db),
+):
+    """
+    Compatibility endpoint for reading one score through the
+    checker-style /api/judge/scores/{score_id} route.
+    """
+
+    event = _current_event(db)
+
+    score = db.get(
+        models.JudgeScore,
+        score_id,
+    )
+
+    if score is None or score.event_id != event.id:
+        raise HTTPException(
+            status_code=404,
+            detail="Score not found",
+        )
+
+    if score.judge_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot access another judge's score.",
+        )
+
+    rubric = _get_rubric(
+        db,
+        event.id,
+    )
+
+    result = _serialize_score(
+        score,
+        db,
+    )
+
+    result["weighted_average"] = (
+        _calculate_weighted_average(
+            score,
+            rubric,
+        )
+    )
+
+    return result
+
+
+@compat_router.get("/api/export.csv")
+def checker_export_scores_csv(
+    user=Depends(require_role("organizer")),
+    db: DBSession = Depends(get_db),
+):
+    """
+    Compatibility endpoint for the DOGFOOD acceptance checker.
+
+    Delegates to the same organizer-only CSV export logic used by
+    /api/judging/export.csv.
+    """
+
+    return export_scores_csv(
+        user=user,
+        db=db,
     )
