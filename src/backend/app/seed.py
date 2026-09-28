@@ -95,6 +95,38 @@ def _get_or_create_role(
     return role_row
 
 
+T2_RUBRIC_NAMES = [
+    "functionality",
+    "quality",
+    "innovation",
+    "values",
+]
+
+
+def _normalize_t2_criteria(criteria: dict) -> dict:
+    """
+    Return a complete T2 criteria object.
+
+    Older fixture rows contain only functionality, quality, and innovation.
+    The published rubric also contains values, so legacy rows get an
+    explicit zero for the missing criterion instead of leaving the JSON
+    structurally incomplete.
+    """
+    normalized = {}
+
+    for name in T2_RUBRIC_NAMES:
+        value = criteria.get(name, 0)
+
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            numeric_value = 0.0
+
+        normalized[name] = numeric_value
+
+    return normalized
+
+
 def _seed_t2(
     db: DBSession,
     fixture: dict,
@@ -103,6 +135,14 @@ def _seed_t2(
 ) -> tuple[int, int, int]:
     """
     Populate T2 judging data.
+
+    Fixture judge IDs such as jdg_01 are converted to the
+    real database User IDs before creating or repairing
+    JudgeAssignment and JudgeScore rows.
+
+    Legacy score rows that omit the fourth rubric criterion
+    ("values") are normalized to an explicit 0 so every seeded
+    score matches the published four-criterion rubric.
 
     Returns:
         assignments_created,
@@ -115,23 +155,46 @@ def _seed_t2(
     scores_created = 0
 
     # ---------------------------------------------------------------
+    # Build fixture judge ID -> real database user ID mapping
+    # ---------------------------------------------------------------
+
+    judge_id_map: dict[str, str] = {}
+
+    # Use the fixture judge email to find the actual database user.
+    # This is safer than relying only on list ordering.
+    for fixture_judge in fixture.get("judges", []):
+        user = (
+            db.query(models.User)
+            .filter_by(email=fixture_judge["email"])
+            .first()
+        )
+
+        if user:
+            judge_id_map[fixture_judge["id"]] = user.id
+
+    # Also include the supplied judge_users as a fallback.
+    for fixture_judge, db_user in zip(
+        fixture.get("judges", []),
+        judge_users,
+    ):
+        judge_id_map.setdefault(
+            fixture_judge["id"],
+            db_user.id,
+        )
+
+    # ---------------------------------------------------------------
     # T2 RUBRIC
     # ---------------------------------------------------------------
-    #
+
     # The fixture scores use these four criteria:
     # functionality
     # quality
     # innovation
     # values
-    #
+
     # We give them equal weights for the seeded demo rubric.
-    #
-    rubric_names = [
-        "functionality",
-        "quality",
-        "innovation",
-        "values",
-    ]
+
+    rubric_names = T2_RUBRIC_NAMES
 
     for name in rubric_names:
         existing = (
@@ -162,33 +225,75 @@ def _seed_t2(
     # ---------------------------------------------------------------
     # T2 SCORES + ASSIGNMENTS
     # ---------------------------------------------------------------
-    #
+
     # The fixture already contains judge/project/criteria/comment
     # records. Convert each fixture score into:
     #
     #   JudgeAssignment
     #   JudgeScore
     #
+    # while replacing fixture judge IDs with real database user IDs.
+
     scores = fixture.get("scores", [])
 
     for score in scores:
-        judge_id = score["judge"]
+        fixture_judge_id = score["judge"]
         project_id = score["project"]
 
-        # Make sure the assignment exists.
-        assignment = (
+        # Convert fixture judge ID -> real database user ID.
+        real_judge_id = judge_id_map.get(fixture_judge_id)
+
+        # If the judge cannot be resolved, skip this fixture score
+        # instead of creating an invalid database reference.
+        if not real_judge_id:
+            print(
+                "Warning: could not map fixture judge "
+                f"{fixture_judge_id} to a database user."
+            )
+            continue
+
+        # -----------------------------------------------------------
+        # Repair any old assignment that still contains the fixture ID
+        # -----------------------------------------------------------
+
+        old_assignment = (
             db.query(models.JudgeAssignment)
             .filter_by(
-                judge_id=judge_id,
+                judge_id=fixture_judge_id,
                 project_id=project_id,
                 event_id=event.id,
             )
             .first()
         )
 
+        # -----------------------------------------------------------
+        # Find assignment using REAL judge ID
+        # -----------------------------------------------------------
+
+        assignment = (
+            db.query(models.JudgeAssignment)
+            .filter_by(
+                judge_id=real_judge_id,
+                project_id=project_id,
+                event_id=event.id,
+            )
+            .first()
+        )
+
+        if old_assignment:
+            if assignment is None:
+                # Repair the legacy row in place.
+                old_assignment.judge_id = real_judge_id
+                assignment = old_assignment
+            elif old_assignment.id != assignment.id:
+                # If both legacy and corrected rows exist, keep only
+                # the corrected assignment.
+                db.delete(old_assignment)
+                db.flush()
+
         if not assignment:
             assignment = models.JudgeAssignment(
-                judge_id=judge_id,
+                judge_id=real_judge_id,
                 project_id=project_id,
                 event_id=event.id,
             )
@@ -198,25 +303,69 @@ def _seed_t2(
 
             assignments_created += 1
 
-        # Make sure the score exists.
-        existing_score = (
+        # -----------------------------------------------------------
+        # Repair any old score that still contains the fixture ID
+        # -----------------------------------------------------------
+
+        old_score = (
             db.query(models.JudgeScore)
             .filter_by(
-                judge_id=judge_id,
+                judge_id=fixture_judge_id,
                 project_id=project_id,
                 event_id=event.id,
             )
             .first()
         )
 
+        existing_score = (
+            db.query(models.JudgeScore)
+            .filter_by(
+                judge_id=real_judge_id,
+                project_id=project_id,
+                event_id=event.id,
+            )
+            .first()
+        )
+
+        if old_score:
+            if existing_score is None:
+                old_score.judge_id = real_judge_id
+                existing_score = old_score
+            else:
+                # If both old and corrected records somehow exist,
+                # keep the corrected record and remove the duplicate.
+                db.delete(old_score)
+                db.flush()
+
+        # -----------------------------------------------------------
+        # Normalize existing or newly created score criteria
+        # -----------------------------------------------------------
+
         if existing_score:
+            try:
+                existing_criteria = json.loads(
+                    existing_score.criteria_json or "{}"
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                existing_criteria = {}
+
+            normalized_criteria = _normalize_t2_criteria(
+                existing_criteria
+            )
+
+            if existing_criteria != normalized_criteria:
+                existing_score.criteria_json = json.dumps(
+                    normalized_criteria
+                )
+
             continue
 
-        criteria = score.get("criteria", {})
+        fixture_criteria = score.get("criteria", {})
+        criteria = _normalize_t2_criteria(fixture_criteria)
 
         db.add(
             models.JudgeScore(
-                judge_id=judge_id,
+                judge_id=real_judge_id,
                 project_id=project_id,
                 event_id=event.id,
                 criteria_json=json.dumps(criteria),
@@ -279,6 +428,7 @@ def seed() -> None:
             # --------------------------------------------------------
             # Tracks
             # --------------------------------------------------------
+
             for t in fixture["tracks"]:
                 db.add(
                     models.Track(
@@ -293,6 +443,7 @@ def seed() -> None:
             # --------------------------------------------------------
             # Judges
             # --------------------------------------------------------
+
             judge_users = []
 
             for j in fixture["judges"]:
@@ -316,6 +467,7 @@ def seed() -> None:
             # --------------------------------------------------------
             # Teams + participants
             # --------------------------------------------------------
+
             for t in fixture["teams"]:
                 existing_team = (
                     db.query(models.Team)
@@ -372,6 +524,7 @@ def seed() -> None:
             # --------------------------------------------------------
             # Projects
             # --------------------------------------------------------
+
             for p in fixture["projects"]:
                 existing_project = (
                     db.query(models.Project)
@@ -470,6 +623,7 @@ def seed() -> None:
         # ------------------------------------------------------------
         # Judge A
         # ------------------------------------------------------------
+
         if len(judge_users) >= 1:
             existing_session = (
                 db.query(models.Session)
@@ -488,6 +642,7 @@ def seed() -> None:
         # ------------------------------------------------------------
         # Judge B
         # ------------------------------------------------------------
+
         if len(judge_users) >= 2:
             existing_session = (
                 db.query(models.Session)
@@ -506,6 +661,7 @@ def seed() -> None:
         # ------------------------------------------------------------
         # Participant
         # ------------------------------------------------------------
+
         if fixture["teams"]:
             first_team = fixture["teams"][0]
 
