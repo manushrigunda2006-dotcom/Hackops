@@ -132,3 +132,43 @@ class Session(Base):
     token: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# ==================== T2 JUDGING MODELS ====================
+
+class JudgeAssignment(Base):
+    """Assigns a judge to a project for a specific event."""
+
+    __tablename__ = "judge_assignments"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    judge_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"))
+    event_id: Mapped[str] = mapped_column(ForeignKey("events.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class RubricCriterion(Base):
+    """Configurable judging criterion and its weight."""
+
+    __tablename__ = "rubric_criteria"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    event_id: Mapped[str] = mapped_column(ForeignKey("events.id"))
+    name: Mapped[str] = mapped_column(String)
+    weight: Mapped[float] = mapped_column(default=1.0)
+    max_score: Mapped[float] = mapped_column(default=5.0)
+
+
+class JudgeScore(Base):
+    """A score submitted by one judge for one project."""
+
+    __tablename__ = "judge_scores"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    judge_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"))
+    event_id: Mapped[str] = mapped_column(ForeignKey("events.id"))
+    criteria_json: Mapped[str] = mapped_column(String)
+    comment: Mapped[str] = mapped_column(String, default="")
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
