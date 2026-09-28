@@ -1,21 +1,18 @@
-"""Loads data/fixtures.json into SQLite on first boot.
+"""Loads data/fixtures.json into SQLite.
 
-Idempotent: if an Event row already exists, seeding is skipped, so
-restarting the container doesn't wipe anything a demo has added.
+Idempotent seeding for T1 + T2.
 
-Also creates the four checker-facing accounts from .dogfood.toml
-[auth], with fixed session tokens, so `docker compose up` alone is
-enough for `python3 run.py .dogfood.toml` to work — no login step,
-per the "checker never logs in" rule in the spec.
+T1 data is created on the first boot.
+T2 judging data is also created from the fixture scores.
 
-Every seeded human account (organizer, judges, participants) also gets
-the same demo password, "dogfood", so a person can log in through the
-real UI for the demo video using any fixture email.
+If T1 was already seeded before T2 was implemented, running this
+seed function again will add the missing T2 data without deleting
+existing T1 data.
 """
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session as DBSession
 
@@ -24,10 +21,15 @@ from .auth import hash_password
 from .database import Base, SessionLocal, engine
 from .util import to_naive_utc
 
-FIXTURES_PATH = os.environ.get("DOGFOOD_FIXTURES_PATH", "/app/data/fixtures.json")
+
+FIXTURES_PATH = os.environ.get(
+    "DOGFOOD_FIXTURES_PATH",
+    "/app/data/fixtures.json",
+)
+
 DEMO_PASSWORD = "dogfood"
 
-# Fixed tokens — must match .dogfood.toml [auth] exactly.
+# Fixed tokens — must match .dogfood.toml [auth].
 TOKEN_ORGANIZER = "org_7f2a"
 TOKEN_JUDGE_A = "jdg_a_91bc"
 TOKEN_JUDGE_B = "jdg_b_44de"
@@ -35,113 +37,511 @@ TOKEN_PARTICIPANT = "prt_2e88"
 
 
 def _parse_dt(s: str) -> datetime:
-    return to_naive_utc(datetime.fromisoformat(s.replace("Z", "+00:00")))
+    return to_naive_utc(
+        datetime.fromisoformat(s.replace("Z", "+00:00"))
+    )
 
 
-def _get_or_create_user(db: DBSession, email: str, name: str) -> models.User:
+def _get_or_create_user(
+    db: DBSession,
+    email: str,
+    name: str,
+) -> models.User:
     user = db.query(models.User).filter_by(email=email).first()
+
     if user:
         return user
-    user = models.User(email=email, name=name, password_hash=hash_password(DEMO_PASSWORD))
+
+    user = models.User(
+        email=email,
+        name=name,
+        password_hash=hash_password(DEMO_PASSWORD),
+    )
+
     db.add(user)
     db.flush()
+
     return user
+
+
+def _get_or_create_role(
+    db: DBSession,
+    user_id: str,
+    event_id: str,
+    role: str,
+) -> models.Role:
+    role_row = (
+        db.query(models.Role)
+        .filter_by(
+            user_id=user_id,
+            event_id=event_id,
+            role=role,
+        )
+        .first()
+    )
+
+    if role_row:
+        return role_row
+
+    role_row = models.Role(
+        user_id=user_id,
+        event_id=event_id,
+        role=role,
+    )
+
+    db.add(role_row)
+    db.flush()
+
+    return role_row
+
+
+def _seed_t2(
+    db: DBSession,
+    fixture: dict,
+    event: models.Event,
+    judge_users: list[models.User],
+) -> tuple[int, int, int]:
+    """
+    Populate T2 judging data.
+
+    Returns:
+        assignments_created,
+        rubrics_created,
+        scores_created
+    """
+
+    assignments_created = 0
+    rubrics_created = 0
+    scores_created = 0
+
+    # ---------------------------------------------------------------
+    # T2 RUBRIC
+    # ---------------------------------------------------------------
+    #
+    # The fixture scores use these four criteria:
+    # functionality
+    # quality
+    # innovation
+    # values
+    #
+    # We give them equal weights for the seeded demo rubric.
+    #
+    rubric_names = [
+        "functionality",
+        "quality",
+        "innovation",
+        "values",
+    ]
+
+    for name in rubric_names:
+        existing = (
+            db.query(models.RubricCriterion)
+            .filter_by(
+                event_id=event.id,
+                name=name,
+            )
+            .first()
+        )
+
+        if existing:
+            continue
+
+        db.add(
+            models.RubricCriterion(
+                event_id=event.id,
+                name=name,
+                weight=1.0,
+                max_score=5.0,
+            )
+        )
+
+        rubrics_created += 1
+
+    db.flush()
+
+    # ---------------------------------------------------------------
+    # T2 SCORES + ASSIGNMENTS
+    # ---------------------------------------------------------------
+    #
+    # The fixture already contains judge/project/criteria/comment
+    # records. Convert each fixture score into:
+    #
+    #   JudgeAssignment
+    #   JudgeScore
+    #
+    scores = fixture.get("scores", [])
+
+    for score in scores:
+        judge_id = score["judge"]
+        project_id = score["project"]
+
+        # Make sure the assignment exists.
+        assignment = (
+            db.query(models.JudgeAssignment)
+            .filter_by(
+                judge_id=judge_id,
+                project_id=project_id,
+                event_id=event.id,
+            )
+            .first()
+        )
+
+        if not assignment:
+            assignment = models.JudgeAssignment(
+                judge_id=judge_id,
+                project_id=project_id,
+                event_id=event.id,
+            )
+
+            db.add(assignment)
+            db.flush()
+
+            assignments_created += 1
+
+        # Make sure the score exists.
+        existing_score = (
+            db.query(models.JudgeScore)
+            .filter_by(
+                judge_id=judge_id,
+                project_id=project_id,
+                event_id=event.id,
+            )
+            .first()
+        )
+
+        if existing_score:
+            continue
+
+        criteria = score.get("criteria", {})
+
+        db.add(
+            models.JudgeScore(
+                judge_id=judge_id,
+                project_id=project_id,
+                event_id=event.id,
+                criteria_json=json.dumps(criteria),
+                comment=score.get("comment", ""),
+                submitted_at=_parse_dt(
+                    score.get(
+                        "submitted_at",
+                        fixture["event"]["submissions_close"],
+                    )
+                ),
+            )
+        )
+
+        scores_created += 1
+
+    db.flush()
+
+    return (
+        assignments_created,
+        rubrics_created,
+        scores_created,
+    )
 
 
 def seed() -> None:
     Base.metadata.create_all(bind=engine)
 
     db = SessionLocal()
-    try:
-        if db.query(models.Event).first() is not None:
-            return  # already seeded
 
+    try:
         with open(FIXTURES_PATH, encoding="utf-8") as f:
             fixture = json.load(f)
 
-        close_at = _parse_dt(fixture["event"]["submissions_close"])
-        open_at = close_at - timedelta(days=30)
+        # ============================================================
+        # T1 SEEDING
+        # ============================================================
 
-        event = models.Event(
-            id=fixture["event"]["id"],
-            name=fixture["event"]["name"],
-            description="Seeded from the DOGFOOD 2026 shared fixtures.",
-            submissions_open_at=open_at,
-            submissions_close_at=close_at,
-        )
-        db.add(event)
-        db.flush()
+        event = db.query(models.Event).first()
 
-        for t in fixture["tracks"]:
-            db.add(models.Track(id=t["id"], event_id=event.id, name=t["name"]))
-        db.flush()
-
-        # --- Judges -----------------------------------------------------
-        judge_users = []
-        for j in fixture["judges"]:
-            user = _get_or_create_user(db, j["email"], j["name"])
-            db.add(models.Role(user_id=user.id, event_id=event.id, role="judge"))
-            judge_users.append(user)
-        db.flush()
-
-        # --- Teams + participants ----------------------------------------
-        for t in fixture["teams"]:
-            team = models.Team(
-                id=t["id"],
-                event_id=event.id,
-                name=t["name"],
-                invite_token=f"invite-{t['id']}",
+        if event is None:
+            close_at = _parse_dt(
+                fixture["event"]["submissions_close"]
             )
-            db.add(team)
+
+            open_at = close_at - timedelta(days=30)
+
+            event = models.Event(
+                id=fixture["event"]["id"],
+                name=fixture["event"]["name"],
+                description=(
+                    "Seeded from the DOGFOOD 2026 shared fixtures."
+                ),
+                submissions_open_at=open_at,
+                submissions_close_at=close_at,
+            )
+
+            db.add(event)
             db.flush()
 
-            for idx, email in enumerate(t["members"]):
-                member = _get_or_create_user(db, email, email.split("@")[0])
-                db.add(models.TeamMember(team_id=team.id, user_id=member.id))
-                db.add(models.Role(user_id=member.id, event_id=event.id, role="participant"))
-        db.flush()
+            # --------------------------------------------------------
+            # Tracks
+            # --------------------------------------------------------
+            for t in fixture["tracks"]:
+                db.add(
+                    models.Track(
+                        id=t["id"],
+                        event_id=event.id,
+                        name=t["name"],
+                    )
+                )
 
-        # --- Projects -----------------------------------------------------
-        for p in fixture["projects"]:
-            submitted_at = _parse_dt(p["submitted_at"])
+            db.flush()
+
+            # --------------------------------------------------------
+            # Judges
+            # --------------------------------------------------------
+            judge_users = []
+
+            for j in fixture["judges"]:
+                user = _get_or_create_user(
+                    db,
+                    j["email"],
+                    j["name"],
+                )
+
+                _get_or_create_role(
+                    db,
+                    user.id,
+                    event.id,
+                    "judge",
+                )
+
+                judge_users.append(user)
+
+            db.flush()
+
+            # --------------------------------------------------------
+            # Teams + participants
+            # --------------------------------------------------------
+            for t in fixture["teams"]:
+                existing_team = (
+                    db.query(models.Team)
+                    .filter_by(id=t["id"])
+                    .first()
+                )
+
+                if existing_team:
+                    team = existing_team
+                else:
+                    team = models.Team(
+                        id=t["id"],
+                        event_id=event.id,
+                        name=t["name"],
+                        invite_token=f"invite-{t['id']}",
+                    )
+
+                    db.add(team)
+                    db.flush()
+
+                for email in t["members"]:
+                    member = _get_or_create_user(
+                        db,
+                        email,
+                        email.split("@")[0],
+                    )
+
+                    existing_member = (
+                        db.query(models.TeamMember)
+                        .filter_by(
+                            team_id=team.id,
+                            user_id=member.id,
+                        )
+                        .first()
+                    )
+
+                    if not existing_member:
+                        db.add(
+                            models.TeamMember(
+                                team_id=team.id,
+                                user_id=member.id,
+                            )
+                        )
+
+                    _get_or_create_role(
+                        db,
+                        member.id,
+                        event.id,
+                        "participant",
+                    )
+
+            db.flush()
+
+            # --------------------------------------------------------
+            # Projects
+            # --------------------------------------------------------
+            for p in fixture["projects"]:
+                existing_project = (
+                    db.query(models.Project)
+                    .filter_by(id=p["id"])
+                    .first()
+                )
+
+                if existing_project:
+                    continue
+
+                submitted_at = _parse_dt(
+                    p["submitted_at"]
+                )
+
+                db.add(
+                    models.Project(
+                        id=p["id"],
+                        team_id=p["team"],
+                        track_id=p.get("track"),
+                        title=p["title"],
+                        summary=p["summary"],
+                        repo_url=p.get("repo_url", ""),
+                        status="submitted",
+                        submitted_at=submitted_at,
+                        updated_at=submitted_at,
+                    )
+                )
+
+            db.flush()
+
+        else:
+            # Existing database: recover the fixture's judges.
+            judge_users = []
+
+            for j in fixture["judges"]:
+                user = (
+                    db.query(models.User)
+                    .filter_by(email=j["email"])
+                    .first()
+                )
+
+                if user:
+                    judge_users.append(user)
+
+                    _get_or_create_role(
+                        db,
+                        user.id,
+                        event.id,
+                        "judge",
+                    )
+
+            db.flush()
+
+        # ============================================================
+        # T2 SEEDING
+        # ============================================================
+
+        assignments, rubrics, scores = _seed_t2(
+            db,
+            fixture,
+            event,
+            judge_users,
+        )
+
+        # ============================================================
+        # CHECKER-FACING DEMO ACCOUNTS
+        # ============================================================
+
+        organizer = _get_or_create_user(
+            db,
+            "organizer@dogfood.demo",
+            "Demo Organizer",
+        )
+
+        _get_or_create_role(
+            db,
+            organizer.id,
+            event.id,
+            "organizer",
+        )
+
+        existing_session = (
+            db.query(models.Session)
+            .filter_by(token=TOKEN_ORGANIZER)
+            .first()
+        )
+
+        if not existing_session:
             db.add(
-                models.Project(
-                    id=p["id"],
-                    team_id=p["team"],
-                    track_id=p.get("track"),
-                    title=p["title"],
-                    summary=p["summary"],
-                    repo_url=p.get("repo_url", ""),
-                    status="submitted",
-                    submitted_at=submitted_at,
-                    updated_at=submitted_at,
+                models.Session(
+                    token=TOKEN_ORGANIZER,
+                    user_id=organizer.id,
                 )
             )
-        db.flush()
 
-        # --- Checker-facing demo accounts ---------------------------------
-        organizer = _get_or_create_user(db, "organizer@dogfood.demo", "Demo Organizer")
-        db.add(models.Role(user_id=organizer.id, event_id=event.id, role="organizer"))
-        db.add(models.Session(token=TOKEN_ORGANIZER, user_id=organizer.id))
+        # ------------------------------------------------------------
+        # Judge A
+        # ------------------------------------------------------------
+        if len(judge_users) >= 1:
+            existing_session = (
+                db.query(models.Session)
+                .filter_by(token=TOKEN_JUDGE_A)
+                .first()
+            )
 
-        # judge_a / judge_b in .dogfood.toml map onto two real seeded
-        # judges, so T2's peer-score isolation check ("judge_b cannot
-        # read judge_a's scores") is testing two genuinely distinct
-        # accounts rather than aliases of the same one.
-        db.add(models.Session(token=TOKEN_JUDGE_A, user_id=judge_users[0].id))
-        db.add(models.Session(token=TOKEN_JUDGE_B, user_id=judge_users[1].id))
+            if not existing_session:
+                db.add(
+                    models.Session(
+                        token=TOKEN_JUDGE_A,
+                        user_id=judge_users[0].id,
+                    )
+                )
 
-        first_team = fixture["teams"][0]
-        participant_email = first_team["members"][0]
-        participant = db.query(models.User).filter_by(email=participant_email).first()
-        db.add(models.Session(token=TOKEN_PARTICIPANT, user_id=participant.id))
+        # ------------------------------------------------------------
+        # Judge B
+        # ------------------------------------------------------------
+        if len(judge_users) >= 2:
+            existing_session = (
+                db.query(models.Session)
+                .filter_by(token=TOKEN_JUDGE_B)
+                .first()
+            )
+
+            if not existing_session:
+                db.add(
+                    models.Session(
+                        token=TOKEN_JUDGE_B,
+                        user_id=judge_users[1].id,
+                    )
+                )
+
+        # ------------------------------------------------------------
+        # Participant
+        # ------------------------------------------------------------
+        if fixture["teams"]:
+            first_team = fixture["teams"][0]
+
+            if first_team["members"]:
+                participant_email = first_team["members"][0]
+
+                participant = (
+                    db.query(models.User)
+                    .filter_by(email=participant_email)
+                    .first()
+                )
+
+                if participant:
+                    existing_session = (
+                        db.query(models.Session)
+                        .filter_by(token=TOKEN_PARTICIPANT)
+                        .first()
+                    )
+
+                    if not existing_session:
+                        db.add(
+                            models.Session(
+                                token=TOKEN_PARTICIPANT,
+                                user_id=participant.id,
+                            )
+                        )
 
         db.commit()
+
         print(
-            f"Seeded: {len(fixture['tracks'])} tracks, {len(fixture['judges'])} judges, "
-            f"{len(fixture['teams'])} teams, {len(fixture['projects'])} projects."
+            "T2 seed complete: "
+            f"{assignments} assignments, "
+            f"{rubrics} rubrics, "
+            f"{scores} scores."
         )
-        print(f"Checker demo accounts ready (tokens fixed, see .dogfood.toml).")
+
     finally:
         db.close()
 
