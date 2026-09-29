@@ -5,7 +5,12 @@ you change anything here.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -54,11 +59,34 @@ class Event(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String)
     description: Mapped[str] = mapped_column(String, default="")
-    submissions_open_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    submissions_close_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    submissions_open_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    submissions_close_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    voting_open_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    voting_close_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_by: Mapped[str] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_now,
+    )
 
 class Track(Base):
     __tablename__ = "tracks"
@@ -172,3 +200,82 @@ class JudgeScore(Base):
     criteria_json: Mapped[str] = mapped_column(String)
     comment: Mapped[str] = mapped_column(String, default="")
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    
+# ==================== T3 COMMUNITY VOTING ====================
+
+class CommunityVote(Base):
+    """One authenticated community vote for one event."""
+
+    __tablename__ = "community_votes"
+
+    id: Mapped[str] = mapped_column(
+        String,
+        primary_key=True,
+        default=_uuid,
+    )
+
+    event_id: Mapped[str] = mapped_column(
+        ForeignKey("events.id"),
+        nullable=False,
+        index=True,
+    )
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id"),
+        nullable=False,
+        index=True,
+    )
+
+    voter_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_now,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "voter_id",
+            name="uq_community_vote_event_voter",
+        ),
+    )
+    
+# ==================== T3 PROJECT COMMENTS ====================
+
+class ProjectComment(Base):
+    """A community comment attached to a submitted project."""
+
+    __tablename__ = "project_comments"
+
+    id: Mapped[str] = mapped_column(
+        String,
+        primary_key=True,
+        default=_uuid,
+    )
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id"),
+        nullable=False,
+        index=True,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    content: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_now,
+    )
