@@ -16,6 +16,16 @@ def _out(event: models.Event) -> schemas.EventOut:
         description=event.description,
         submissions_open_at=iso_z(event.submissions_open_at),
         submissions_close_at=iso_z(event.submissions_close_at),
+        voting_open_at=(
+            iso_z(event.voting_open_at)
+            if event.voting_open_at
+            else None
+        ),
+        voting_close_at=(
+            iso_z(event.voting_close_at)
+            if event.voting_close_at
+            else None
+        ),
     )
 
 
@@ -41,11 +51,25 @@ def create_event(
     # sends no offset) or aware (a direct API call with one) — normalize
     # either way before storing, same convention as everywhere else.
     event = models.Event(
-        name=body.name,
-        submissions_open_at=to_naive_utc(body.submissions_open_at),
-        submissions_close_at=to_naive_utc(body.submissions_close_at),
-        created_by=user.id,
-    )
+    name=body.name,
+    submissions_open_at=to_naive_utc(
+        body.submissions_open_at
+    ),
+    submissions_close_at=to_naive_utc(
+        body.submissions_close_at
+    ),
+    voting_open_at=(
+        to_naive_utc(body.voting_open_at)
+        if body.voting_open_at
+        else None
+    ),
+    voting_close_at=(
+        to_naive_utc(body.voting_close_at)
+        if body.voting_close_at
+        else None
+    ),
+    created_by=user.id,
+)
     db.add(event)
     db.flush()  # get event.id before creating dependent rows
 
