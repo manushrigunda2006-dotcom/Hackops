@@ -11,6 +11,9 @@ export default function Navbar() {
         <Link to="/" className="navbar-brand">
           DOGFOOD<span className="mono navbar-brand-dot">.portal</span>
         </Link>
+        <Link to="/voting">
+  Community Voting
+</Link>
         <nav className="navbar-links">
           <NavLink to="/" end>
             Gallery

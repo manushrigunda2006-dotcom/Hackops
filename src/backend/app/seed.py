@@ -416,11 +416,18 @@ def seed() -> None:
                 id=fixture["event"]["id"],
                 name=fixture["event"]["name"],
                 description=(
-                    "Seeded from the DOGFOOD 2026 shared fixtures."
-                ),
+                "Seeded from the DOGFOOD 2026 shared fixtures."
+             ),
                 submissions_open_at=open_at,
                 submissions_close_at=close_at,
-            )
+
+    # T3 community voting window.
+    #
+    # The DOGFOOD fixture does not specify voting dates,
+    # so these are application-level demo values.
+    voting_open_at=close_at,
+    voting_close_at=close_at + timedelta(days=7),
+)
 
             db.add(event)
             db.flush()

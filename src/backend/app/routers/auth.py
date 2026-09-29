@@ -2,7 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session as DBSession
 
 from .. import models, schemas
-from ..auth import COOKIE_KW, create_session, get_current_user, verify_password
+from ..auth import (
+    COOKIE_KW,
+    create_session,
+    get_current_user,
+    hash_password,
+    verify_password,
+)
 from ..database import get_db
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -17,6 +23,65 @@ def login(body: schemas.LoginIn, response: Response, db: DBSession = Depends(get
     response.set_cookie("session", token, **COOKIE_KW)
     return {"ok": True}
 
+@router.post("/register")
+def register(
+    body: schemas.RegisterIn,
+    response: Response,
+    db: DBSession = Depends(get_db),
+):
+    email = body.email.strip().lower()
+    name = body.name.strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="Name is required.",
+        )
+
+    if len(body.password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 6 characters.",
+        )
+
+    existing_user = (
+        db.query(models.User)
+        .filter_by(email=email)
+        .first()
+    )
+
+    if existing_user:
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this email already exists.",
+        )
+
+    user = models.User(
+        email=email,
+        name=name,
+        password_hash=hash_password(body.password),
+    )
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    token = create_session(db, user.id)
+
+    response.set_cookie(
+        "session",
+        token,
+        **COOKIE_KW,
+    )
+
+    return {
+        "ok": True,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+        },
+    }
 
 @router.post("/logout")
 def logout(response: Response, user=Depends(get_current_user)):

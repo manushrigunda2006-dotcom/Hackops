@@ -8,6 +8,12 @@ class LoginIn(BaseModel):
     password: str
 
 
+class RegisterIn(BaseModel):
+    email: str
+    password: str
+    name: str
+
+
 class MeOut(BaseModel):
     id: str
     email: str
@@ -21,12 +27,18 @@ class EventOut(BaseModel):
     description: str
     submissions_open_at: str
     submissions_close_at: str
+    voting_open_at: str | None
+    voting_close_at: str | None
 
 
 class EventCreateIn(BaseModel):
     name: str
     submissions_open_at: datetime
     submissions_close_at: datetime
+
+    voting_open_at: datetime | None = None
+    voting_close_at: datetime | None = None
+
     tracks: list[str] = Field(default_factory=list)
 
 
@@ -58,3 +70,15 @@ class ProjectOut(BaseModel):
     status: str
     submitted_at: str | None
     updated_at: str | None
+
+class CommentCreateIn(BaseModel):
+    content: str
+
+
+class CommentOut(BaseModel):
+    id: str
+    project_id: str
+    user_id: str
+    user_name: str
+    content: str
+    created_at: str

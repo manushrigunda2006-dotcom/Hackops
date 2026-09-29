@@ -7,12 +7,18 @@ import SubmitProject from "./pages/SubmitProject";
 import TeamJoin from "./pages/TeamJoin";
 import CreateEvent from "./pages/CreateEvent";
 import NotFound from "./pages/NotFound";
+import CommunityVoting from "./pages/CommunityVoting";
+import Register from "./pages/Register";
 
 export default function App() {
   return (
     <>
       <Navbar />
       <Routes>
+        <Route
+  path="/voting"
+  element={<CommunityVoting />}
+/>
         <Route path="/" element={<Gallery />} />
         <Route path="/projects/:id" element={<ProjectDetail />} />
         <Route path="/submit" element={<SubmitProject />} />
@@ -20,6 +26,10 @@ export default function App() {
         <Route path="/teams/join/:token" element={<TeamJoin />} />
         <Route path="/events/new" element={<CreateEvent />} />
         <Route path="/login" element={<Login />} />
+        <Route
+  path="/register"
+  element={<Register />}
+/>
         <Route path="*" element={<NotFound />} />
       </Routes>
     </>
